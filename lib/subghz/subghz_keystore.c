@@ -243,13 +243,113 @@ bool subghz_keystore_load(SubGhzKeystore* instance, const char* file_name) {
     return result;
 }
 
+bool subghz_keystore_save_write_unecrypted_data(
+    SubGhzKeystore* instance,
+    FlipperFormat* flipper_format) {
+    char* decrypted_line = malloc(SUBGHZ_KEYSTORE_FILE_DECRYPTED_LINE_SIZE);
+
+    Stream* stream = flipper_format_get_raw_stream(flipper_format);
+    for
+        M_EACH(key, instance->data, SubGhzKeyArray_t) {
+            // Wipe buffer before packing
+            memset(decrypted_line, 0, SUBGHZ_KEYSTORE_FILE_DECRYPTED_LINE_SIZE);
+
+            // Form unecreypted line
+            int len = snprintf(
+                decrypted_line,
+                SUBGHZ_KEYSTORE_FILE_DECRYPTED_LINE_SIZE,
+                "%08lX%08lX:%hu:%s",
+                (uint32_t)(key->key >> 32),
+                (uint32_t)key->key,
+                key->type,
+                furi_string_get_cstr(key->name));
+
+            // Verify length and align
+            furi_assert(len > 0);
+            if(len % 16 != 0) {
+                len += (16 - len % 16);
+            }
+            furi_assert(len % 16 == 0);
+            furi_assert(len <= SUBGHZ_KEYSTORE_FILE_DECRYPTED_LINE_SIZE);
+
+            stream_write_cstring(stream, decrypted_line);
+            stream_write_char(stream, '\n');
+        }
+
+    free(decrypted_line);
+
+    FURI_LOG_I(TAG, "Success. UnEncrypted keys saved");
+
+    return true;
+}
+
+bool subghz_keystore_save_write_encrypted_data(
+    SubGhzKeystore* instance,
+    FlipperFormat* flipper_format) {
+    char* decrypted_line = malloc(SUBGHZ_KEYSTORE_FILE_DECRYPTED_LINE_SIZE);
+    char* encrypted_line = malloc(SUBGHZ_KEYSTORE_FILE_ENCRYPTED_LINE_SIZE);
+
+    Stream* stream = flipper_format_get_raw_stream(flipper_format);
+    size_t encrypted_line_count = 0;
+    for
+        M_EACH(key, instance->data, SubGhzKeyArray_t) {
+            // Wipe buffer before packing
+            memset(decrypted_line, 0, SUBGHZ_KEYSTORE_FILE_DECRYPTED_LINE_SIZE);
+            memset(encrypted_line, 0, SUBGHZ_KEYSTORE_FILE_ENCRYPTED_LINE_SIZE);
+            // Form unecreypted line
+            int len = snprintf(
+                decrypted_line,
+                SUBGHZ_KEYSTORE_FILE_DECRYPTED_LINE_SIZE,
+                "%08lX%08lX:%hu:%s",
+                (uint32_t)(key->key >> 32),
+                (uint32_t)key->key,
+                key->type,
+                furi_string_get_cstr(key->name));
+            // Verify length and align
+            furi_assert(len > 0);
+            if(len % 16 != 0) {
+                len += (16 - len % 16);
+            }
+            furi_assert(len % 16 == 0);
+            furi_assert(len <= SUBGHZ_KEYSTORE_FILE_DECRYPTED_LINE_SIZE);
+            // Form encrypted line
+            if(!furi_hal_crypto_encrypt((uint8_t*)decrypted_line, (uint8_t*)encrypted_line, len)) {
+                FURI_LOG_E(TAG, "Encryption failed");
+                break;
+            }
+            // HEX Encode encrypted line
+            const char xx[] = "0123456789ABCDEF";
+            for(int i = 0; i < len; i++) {
+                size_t cursor = len - i - 1;
+                size_t hex_cursor = len * 2 - i * 2 - 1;
+                encrypted_line[hex_cursor] = xx[encrypted_line[cursor] & 0xF];
+                encrypted_line[hex_cursor - 1] = xx[(encrypted_line[cursor] >> 4) & 0xF];
+            }
+            stream_write_cstring(stream, encrypted_line);
+            stream_write_char(stream, '\n');
+            encrypted_line_count++;
+        }
+
+    furi_hal_crypto_store_unload_key(SUBGHZ_KEYSTORE_FILE_ENCRYPTION_KEY_SLOT);
+    size_t total_keys = SubGhzKeyArray_size(instance->data);
+    bool result = encrypted_line_count == total_keys;
+    if(result) {
+        FURI_LOG_I(TAG, "Success. Encrypted: %d of %d", encrypted_line_count, total_keys);
+    } else {
+        FURI_LOG_E(TAG, "Failure. Encrypted: %d of %d", encrypted_line_count, total_keys);
+    }
+
+    free(encrypted_line);
+    free(decrypted_line);
+
+    return result;
+}
+
 bool subghz_keystore_save(SubGhzKeystore* instance, const char* file_name, uint8_t* iv) {
     furi_assert(instance);
     bool result = false;
 
     Storage* storage = furi_record_open(RECORD_STORAGE);
-    char* decrypted_line = malloc(SUBGHZ_KEYSTORE_FILE_DECRYPTED_LINE_SIZE);
-    char* encrypted_line = malloc(SUBGHZ_KEYSTORE_FILE_ENCRYPTED_LINE_SIZE);
 
     FlipperFormat* flipper_format = flipper_format_file_alloc(storage);
     do {
@@ -267,72 +367,27 @@ bool subghz_keystore_save(SubGhzKeystore* instance, const char* file_name, uint8
             FURI_LOG_E(TAG, "Unable to add Encryption");
             break;
         }
-        if(!flipper_format_write_hex(flipper_format, "IV", iv, 16)) {
-            FURI_LOG_E(TAG, "Unable to add IV");
-            break;
-        }
 
-        subghz_keystore_mess_with_iv(iv);
-
-        if(!furi_hal_crypto_store_load_key(SUBGHZ_KEYSTORE_FILE_ENCRYPTION_KEY_SLOT, iv)) {
-            FURI_LOG_E(TAG, "Unable to load encryption key");
-            break;
-        }
-
-        Stream* stream = flipper_format_get_raw_stream(flipper_format);
-        size_t encrypted_line_count = 0;
-        for
-            M_EACH(key, instance->data, SubGhzKeyArray_t) {
-                // Wipe buffer before packing
-                memset(decrypted_line, 0, SUBGHZ_KEYSTORE_FILE_DECRYPTED_LINE_SIZE);
-                memset(encrypted_line, 0, SUBGHZ_KEYSTORE_FILE_ENCRYPTED_LINE_SIZE);
-                // Form unecreypted line
-                int len = snprintf(
-                    decrypted_line,
-                    SUBGHZ_KEYSTORE_FILE_DECRYPTED_LINE_SIZE,
-                    "%08lX%08lX:%hu:%s",
-                    (uint32_t)(key->key >> 32),
-                    (uint32_t)key->key,
-                    key->type,
-                    furi_string_get_cstr(key->name));
-                // Verify length and align
-                furi_assert(len > 0);
-                if(len % 16 != 0) {
-                    len += (16 - len % 16);
-                }
-                furi_assert(len % 16 == 0);
-                furi_assert(len <= SUBGHZ_KEYSTORE_FILE_DECRYPTED_LINE_SIZE);
-                // Form encrypted line
-                if(!furi_hal_crypto_encrypt(
-                       (uint8_t*)decrypted_line, (uint8_t*)encrypted_line, len)) {
-                    FURI_LOG_E(TAG, "Encryption failed");
-                    break;
-                }
-                // HEX Encode encrypted line
-                const char xx[] = "0123456789ABCDEF";
-                for(int i = 0; i < len; i++) {
-                    size_t cursor = len - i - 1;
-                    size_t hex_cursor = len * 2 - i * 2 - 1;
-                    encrypted_line[hex_cursor] = xx[encrypted_line[cursor] & 0xF];
-                    encrypted_line[hex_cursor - 1] = xx[(encrypted_line[cursor] >> 4) & 0xF];
-                }
-                stream_write_cstring(stream, encrypted_line);
-                stream_write_char(stream, '\n');
-                encrypted_line_count++;
+        if(iv != NULL) {
+            if(!flipper_format_write_hex(flipper_format, "IV", iv, 16)) {
+                FURI_LOG_E(TAG, "Unable to add IV");
+                break;
             }
-        furi_hal_crypto_store_unload_key(SUBGHZ_KEYSTORE_FILE_ENCRYPTION_KEY_SLOT);
-        size_t total_keys = SubGhzKeyArray_size(instance->data);
-        result = encrypted_line_count == total_keys;
-        if(result) {
-            FURI_LOG_I(TAG, "Success. Encrypted: %d of %d", encrypted_line_count, total_keys);
+            subghz_keystore_mess_with_iv(iv);
+
+            if(!furi_hal_crypto_store_load_key(SUBGHZ_KEYSTORE_FILE_ENCRYPTION_KEY_SLOT, iv)) {
+                FURI_LOG_E(TAG, "Unable to load encryption key");
+                break;
+            }
+
+            result = subghz_keystore_save_write_encrypted_data(instance, flipper_format);
         } else {
-            FURI_LOG_E(TAG, "Failure. Encrypted: %d of %d", encrypted_line_count, total_keys);
+            result = subghz_keystore_save_write_unecrypted_data(instance, flipper_format);
         }
+
     } while(0);
     flipper_format_free(flipper_format);
 
-    free(encrypted_line);
-    free(decrypted_line);
     furi_record_close(RECORD_STORAGE);
 
     return result;

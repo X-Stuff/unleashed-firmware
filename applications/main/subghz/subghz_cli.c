@@ -428,6 +428,8 @@ static void subghz_cli_command_print_usage() {
         "\ttx <3 byte Key: in hex> <frequency: in Hz> <te: us> <repeat: count>\t - Transmitting key\r\n");
     printf("\trx <frequency:in Hz>\t - Reception key\r\n");
     printf("\tdecode_raw <file_name: path_RAW_file>\t - Testing\r\n");
+    printf(
+        "\tkeeloq_resave <path_keeloq_input> <path_keeloq_output> [IV:16 bytes in hex]\t - Re-Save keeloq manufacture keys\r\n");
 
     if(furi_hal_rtc_is_flag_set(FuriHalRtcFlagDebug)) {
         printf("\r\n");
@@ -435,13 +437,11 @@ static void subghz_cli_command_print_usage() {
         printf("\ttx_carrier <frequency:in Hz>\t - Transmit carrier\r\n");
         printf("\trx_carrier <frequency:in Hz>\t - Receive carrier\r\n");
         printf(
-            "\tencrypt_keeloq <path_decrypted_file> <path_encrypted_file> <IV:16 bytes in hex>\t - Encrypt keeloq manufacture keys\r\n");
-        printf(
             "\tencrypt_raw <path_decrypted_file> <path_encrypted_file> <IV:16 bytes in hex>\t - Encrypt RAW data\r\n");
     }
 }
 
-static void subghz_cli_command_encrypt_keeloq(Cli* cli, FuriString* args) {
+static void subghz_cli_command_keeloq_resave(Cli* cli, FuriString* args) {
     UNUSED(cli);
     uint8_t iv[16];
 
@@ -463,17 +463,15 @@ static void subghz_cli_command_encrypt_keeloq(Cli* cli, FuriString* args) {
             break;
         }
 
-        if(!args_read_hex_bytes(args, iv, 16)) {
-            subghz_cli_command_print_usage();
-            break;
-        }
+        bool save_encrypted = args_read_hex_bytes(args, iv, 16);
 
         if(!subghz_keystore_load(keystore, furi_string_get_cstr(source))) {
             printf("Failed to load Keystore");
             break;
         }
 
-        if(!subghz_keystore_save(keystore, furi_string_get_cstr(destination), iv)) {
+        if(!subghz_keystore_save(
+               keystore, furi_string_get_cstr(destination), save_encrypted ? iv : NULL)) {
             printf("Failed to save Keystore");
             break;
         }
@@ -733,12 +731,12 @@ static void subghz_cli_command(Cli* cli, FuriString* args, void* context) {
             break;
         }
 
-        if(furi_hal_rtc_is_flag_set(FuriHalRtcFlagDebug)) {
-            if(furi_string_cmp_str(cmd, "encrypt_keeloq") == 0) {
-                subghz_cli_command_encrypt_keeloq(cli, args);
-                break;
-            }
+        if(furi_string_cmp_str(cmd, "keeloq_resave") == 0) {
+            subghz_cli_command_keeloq_resave(cli, args);
+            break;
+        }
 
+        if(furi_hal_rtc_is_flag_set(FuriHalRtcFlagDebug)) {
             if(furi_string_cmp_str(cmd, "encrypt_raw") == 0) {
                 subghz_cli_command_encrypt_raw(cli, args);
                 break;
